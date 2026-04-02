@@ -67,35 +67,64 @@ def fetch_data(symbol, tf_key):
     except: return None
 
 def calculate_zones(df):
-    if df is None or len(df) < 10: return None
+    # FVG logic needs at least 3 candles (Base, Mom, Current)
+    if df is None or len(df) < 3: return None 
     try:
-        df['sma5'] = df['Close'].rolling(window=5).mean()
         opens, closes = df['Open'].values, df['Close'].values
         highs, lows = df['High'].values, df['Low'].values
-        smas = df['sma5'].values
         active_demand, active_supply = [], []
         
-        for i in range(1, len(df)):
-            bOpen, bClose, bHigh, bLow = opens[i-1], closes[i-1], highs[i-1], lows[i-1]
-            mOpen, mClose, mHigh, mLow = opens[i], closes[i], highs[i], lows[i]
-            sma5 = smas[i]
+        # Loop starts from 2 to check Base [i-2], Mom [i-1], and Conf/FVG [i]
+        for i in range(2, len(df)):
+            # 1. Base Candle [i-2]
+            bOpen, bClose, bHigh, bLow = opens[i-2], closes[i-2], highs[i-2], lows[i-2]
             
+            # 2. Momentum Candle [i-1]
+            mOpen, mClose, mHigh, mLow = opens[i-1], closes[i-1], highs[i-1], lows[i-1]
+            
+            # 3. Confirmation Candle (Current Bar for FVG Check) [i]
+            cHigh, cLow = highs[i], lows[i]
+            
+            # Calculations
             bBody, bRange = abs(bClose - bOpen), bHigh - bLow
             mBody, mRange = abs(mClose - mOpen), mHigh - mLow
             
-            if bRange <= 0 or mRange <= 0: continue
-            isMomValid = (mBody > (bBody * 2)) and (mBody > (mRange * 0.5))
+            # Error Handling / Edge Cases
+            validRanges = (bRange > 0) and (mRange > 0)
+            if not validRanges: continue
             
-            if isMomValid and (mClose > mOpen) and (mClose > bHigh) and (mClose > sma5) and ((mClose - max(mOpen, bHigh)) > (mBody * 0.5)):
+            # Core Logic & Conditions
+            isMomSizeValid  = (mBody > (bBody * 2))
+            isMomRangeValid = (mBody > (mRange * 0.5))
+            
+            isGreenMom = (mClose > mOpen)
+            isRedMom   = (mClose < mOpen)
+            
+            # FVG Logic
+            hasBullishFVG = (cLow > bHigh)
+            hasBearishFVG = (cHigh < bLow)
+            
+            # Pure price action & FVG breakout logic
+            bullishValid = isGreenMom and (mClose > bHigh) and hasBullishFVG
+            bearishValid = isRedMom   and (mClose < bLow)  and hasBearishFVG
+            
+            # Final Triggers
+            triggerBullishZone = isMomSizeValid and isMomRangeValid and bullishValid
+            triggerBearishZone = isMomSizeValid and isMomRangeValid and bearishValid
+            
+            # Zone Creation in Memory
+            if triggerBullishZone:
                 active_demand.append({'top': bHigh, 'bottom': min(bLow, mLow)})
-            if isMomValid and (mClose < mOpen) and (mClose < bLow) and (mClose < sma5) and ((min(mOpen, bLow) - mClose) > (mBody * 0.5)):
+            if triggerBearishZone:
                 active_supply.append({'top': max(bHigh, mHigh), 'bottom': bLow})
                 
-            active_demand = [z for z in active_demand if closes[i] >= z['bottom']]
-            active_supply = [z for z in active_supply if closes[i] <= z['top']]
+            # Mitigation & Memory Overflow Safety (Matches Pine Script Logic)
+            active_demand = [z for z in active_demand if closes[i] >= z['bottom']] # Remove if close < bottom
+            active_supply = [z for z in active_supply if closes[i] <= z['top']]    # Remove if close > top
             
         latest_price = float(np.ravel(closes[-1])[0])
         
+        # Proximity Logic (Unchanged as per your UI)
         for z in reversed(active_demand):
             if z['top'] > 0:
                 dist = (latest_price - z['top']) / z['top']
